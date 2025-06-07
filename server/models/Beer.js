@@ -1,17 +1,34 @@
-import mongoose from 'mongoose';
+import { Model, DataTypes } from 'sequelize';
+import sequelize from '../../config/database.js';
 
-const beerSchema = new mongoose.Schema({
-    name: { type: String, required: true },
-    type: { type: String, required: true },
-    description: String,
-    isActive: { type: Boolean, default: false },
-    createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now }
+class Beer extends Model {}
+
+Beer.init({
+    name: {
+        type: DataTypes.STRING,
+        allowNull: false
+    },
+    type: {
+        type: DataTypes.STRING
+    },
+    description: {
+        type: DataTypes.TEXT
+    },
+    isActive: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false
+    },
+    createdAt: {
+        type: DataTypes.DATE,
+        defaultValue: DataTypes.NOW
+    },
+    updatedAt: {
+        type: DataTypes.DATE,
+        defaultValue: DataTypes.NOW
+    }
+}, {
+    sequelize,
+    modelName: 'Beer'
 });
 
-beerSchema.pre('save', function(next) {
-    this.updatedAt = new Date();
-    next();
-});
-
-export default mongoose.model('Beer', beerSchema);
+export default Beer;
