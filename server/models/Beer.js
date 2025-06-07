@@ -1,9 +1,14 @@
 import { Model, DataTypes } from 'sequelize';
-import sequelize from '../../config/database.js';
+import sequelize from '../config/database.js';
 
 class Beer extends Model {}
 
 Beer.init({
+    id: {
+        type: DataTypes.INTEGER,
+        primaryKey: true,
+        autoIncrement: true
+    },
     name: {
         type: DataTypes.STRING,
         allowNull: false
