@@ -8,7 +8,7 @@ if (!process.env.DATABASE_URL) {
     process.exit(1);
 }
 
-const sequelize = new Sequelize(process.env.DATABASE_URL, {
+export const sequelize = new Sequelize(process.env.DATABASE_URL, {
     dialect: 'mysql',
     logging: false,
     dialectOptions: {
@@ -25,5 +25,3 @@ sequelize.authenticate()
         console.error('❌ Unable to connect to the database:', err);
         process.exit(1);
     });
-
-export default sequelize;
