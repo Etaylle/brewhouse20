@@ -1,9 +1,10 @@
 import express from 'express';
-import mongoose from 'mongoose';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { Op } from 'sequelize';
+import { sequelize } from './config/database.js';
 import Beer from './models/Beer.js';
 import SensorData from './models/SensorData.js';
 import Review from './models/Review.js';
@@ -12,40 +13,51 @@ import sensorData from './sensors.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+console.log('Starting server...');
+console.log('Checking environment variables...');
+console.log('DATABASE_URL:', process.env.DATABASE_URL);
+console.log('PORT:', process.env.PORT);
+
 dotenv.config();
+console.log('Environment variables loaded');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3002;
+console.log('Using port:', PORT);
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-
-// Serve static files from React build in production
-if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.join(__dirname, '../dist')));
-}
+console.log('Middleware configured');
 
 // Database connection
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/brewhouse', {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-}).then(() => console.log('✅ MongoDB connected'))
-    .catch(err => console.error('❌ MongoDB error:', err));
+console.log('Connecting to database...');
+sequelize.sync()
+    .then(() => {
+        console.log('✅ Database connected');
+    })
+    .catch(err => {
+        console.error('❌ Database error:', err);
+        process.exit(1);
+    });
 
 // API Routes
 const PROCESSES = ['gaerung', 'maischen', 'hopfenkochen'];
+console.log('API routes configured');
 
 // Health check
 app.get('/api/health', (req, res) => {
+    console.log('Health check requested');
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 // Current sensor data (mock API functionality)
 app.get('/api/sensor-data/:process', (req, res) => {
+    console.log('Sensor data requested for:', req.params.process);
     const process = req.params.process;
     
     if (!PROCESSES.includes(process)) {
+        console.log('Invalid process:', process);
         return res.status(404).json({ error: 'Process not found' });
     }
     
@@ -58,124 +70,154 @@ app.get('/api/sensor-data/:process', (req, res) => {
 
 // Live sensor data from database
 app.get('/api/live/:process', async (req, res) => {
+    console.log('Live data requested for:', req.params.process);
     try {
         const process = req.params.process;
-        const data = await SensorData.find({ process })
-            .sort({ timestamp: -1 })
-            .limit(50)
-            .sort({ timestamp: 1 });
+        const data = await SensorData.findAll({
+            where: { process },
+            order: [['timestamp', 'DESC']],
+            limit: 50
+        });
+        console.log('Found', data.length, 'records');
         res.json(data);
     } catch (err) {
-        console.error('❌ Error in /api/live:', err);
+        console.error('Error in /api/live:', err);
         res.status(500).json({ error: 'Server error' });
     }
 });
 
 // Historical data
 app.get('/api/history/:process/:date', async (req, res) => {
+    console.log('History requested for:', req.params.process, req.params.date);
     try {
         const { process, date } = req.params;
         const start = new Date(date);
         const end = new Date(date);
         end.setDate(end.getDate() + 1);
 
-        const history = await SensorData.find({
-            process,
-            timestamp: { $gte: start, $lt: end }
+        const history = await SensorData.findAll({
+            where: {
+                process,
+                timestamp: {
+                    [Op.gte]: start,
+                    [Op.lt]: end
+                }
+            },
+            order: [['timestamp', 'ASC']]
         });
 
+        console.log('Found', history.length, 'historical records');
         res.json(history);
     } catch (err) {
-        console.error('❌ Error in /api/history:', err);
+        console.error('Error in /api/history:', err);
         res.status(500).json({ error: 'Server error' });
     }
 });
 
 // Active beer
 app.get('/api/beer/active', async (req, res) => {
+    console.log('Active beer requested');
     try {
-        const activeBeer = await Beer.findOne({ isActive: true });
+        const activeBeer = await Beer.findOne({ where: { isActive: true } });
         if (!activeBeer) {
+            console.log('No active beer found');
             return res.status(404).json({ message: "No active beer found" });
         }
         res.json(activeBeer);
     } catch (err) {
-        console.error("❌ Error fetching active beer:", err);
+        console.error("Error fetching active beer:", err);
         res.status(500).json({ message: "Server error" });
     }
 });
 
 // Submit review
 app.post('/api/review/:biername', async (req, res) => {
+    console.log('Review submitted for:', req.params.biername);
     try {
         const { biername } = req.params;
         const { sterne } = req.body;
 
         if (!sterne || sterne < 1 || sterne > 5) {
-            return res.status(400).json({ error: 'Stars must be between 1 and 5' });
+            console.log('Invalid rating:', sterne);
+            return res.status(400).json({ message: "Invalid rating" });
         }
 
-        const review = new Review({ biername, sterne });
-        await review.save();
-        res.json({ success: true, review });
+        const beer = await Beer.findOne({ where: { name: biername } });
+        if (!beer) {
+            console.log('Beer not found:', biername);
+            return res.status(404).json({ message: "Beer not found" });
+        }
+
+        const review = await Review.create({
+            beer_id: beer.id,
+            sterne
+        });
+
+        console.log('Review created successfully');
+        res.status(201).json({ message: "Review submitted" });
     } catch (err) {
-        console.error('❌ Error in POST /api/review:', err);
-        res.status(500).json({ error: 'Server error' });
+        console.error("Error submitting review:", err);
+        res.status(500).json({ message: "Server error" });
     }
 });
 
-// Get reviews
+// Get reviews for a beer
 app.get('/api/review/:biername', async (req, res) => {
+    console.log('Reviews requested for:', req.params.biername);
     try {
         const { biername } = req.params;
-        const reviews = await Review.find({ biername });
+        const beer = await Beer.findOne({ where: { name: biername } });
+        if (!beer) {
+            console.log('Beer not found:', biername);
+            return res.status(404).json({ message: "Beer not found" });
+        }
 
-        const avg = reviews.length
-            ? (reviews.reduce((sum, r) => sum + r.sterne, 0) / reviews.length).toFixed(2)
-            : null;
-
-        res.json({
-            biername,
-            anzahl: reviews.length,
-            durchschnitt: avg
-        });
+        const reviews = await Review.findAll({ where: { beer_id: beer.id } });
+        const anzahl = reviews.length;
+        const durchschnitt = anzahl > 0 ? (reviews.reduce((sum, r) => sum + r.sterne, 0) / anzahl).toFixed(2) : 0;
+        console.log('Found', anzahl, 'reviews with average', durchschnitt);
+        res.json({ anzahl, durchschnitt });
     } catch (err) {
-        console.error('❌ Error in GET /api/review:', err);
-        res.status(500).json({ error: 'Server error' });
+        console.error("Error fetching reviews:", err);
+        res.status(500).json({ message: "Server error" });
     }
 });
 
-// Serve React app for all non-API routes in production
+// Sensor polling and storage
+async function pollAndStoreSensorData() {
+    console.log('Starting sensor polling');
+    for (const process of PROCESSES) {
+        try {
+            const data = sensorData[process];
+            await SensorData.create({
+                process,
+                values: data,
+                timestamp: new Date()
+            });
+            console.log(`✅ Saved sensor data for ${process}`);
+        } catch (err) {
+            console.error(`❌ Error saving ${process}:`, err);
+        }
+    }
+}
+
+// Start internal sensor polling every 5 seconds
+setInterval(pollAndStoreSensorData, 5000);
+console.log('🔄 Background sensor polling started');
+
+// Serve React frontend in production
 if (process.env.NODE_ENV === 'production') {
+    app.use(express.static(path.join(__dirname, '../dist')));
     app.get('*', (req, res) => {
         res.sendFile(path.join(__dirname, '../dist/index.html'));
     });
 }
 
-// Background sensor data polling
-async function pollAndStoreSensorData() {
-    for (const process of PROCESSES) {
-        try {
-            const data = sensorData[process];
-            const entry = new SensorData({
-                process,
-                values: data,
-                timestamp: new Date()
-            });
-            await entry.save();
-            console.log(`✅ Sensor data saved for ${process}`);
-        } catch (err) {
-            console.error(`❌ Error saving ${process}:`, err.message);
-        }
-    }
-}
-
-// Start background polling every 10 seconds
-setInterval(pollAndStoreSensorData, 10000);
-console.log('🔄 Background sensor polling started');
-
 // Start server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
     console.log(`📊 API endpoints available at http://localhost:${PORT}/api/`);
+}).on('error', (err) => {
+    console.error('Server error:', err);
+    process.exit(1);
 });

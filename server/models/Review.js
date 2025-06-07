@@ -1,9 +1,32 @@
-import mongoose from 'mongoose';
+import { Model, DataTypes } from 'sequelize';
+import sequelize from '../../config/database.js';
 
-const reviewSchema = new mongoose.Schema({
-    biername: { type: String, required: true },
-    sterne: { type: Number, required: true, min: 1, max: 5 },
-    createdAt: { type: Date, default: Date.now }
+class Review extends Model {}
+
+Review.init({
+    beer_id: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        references: {
+            model: 'Beers',
+            key: 'id'
+        }
+    },
+    sterne: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        validate: {
+            min: 1,
+            max: 5
+        }
+    },
+    createdAt: {
+        type: DataTypes.DATE,
+        defaultValue: DataTypes.NOW
+    }
+}, {
+    sequelize,
+    modelName: 'Review'
 });
 
-export default mongoose.model('Review', reviewSchema);
+export default Review;
