@@ -51,6 +51,90 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
+// Create a new beer
+app.post('/api/beer', async (req, res) => {
+    console.log('Creating new beer');
+    try {
+        const { name, type, description, isActive } = req.body;
+        const beer = await Beer.create({
+            name,
+            type,
+            description,
+            isActive
+        });
+        console.log('Beer created:', beer);
+        res.status(201).json(beer);
+    } catch (err) {
+        console.error('Error creating beer:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Get all beers
+app.get('/api/beers', async (req, res) => {
+    console.log('Getting all beers');
+    try {
+        const beers = await Beer.findAll();
+        console.log('Found', beers.length, 'beers');
+        res.json(beers);
+    } catch (err) {
+        console.error('Error fetching beers:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Get a specific beer by ID
+app.get('/api/beer/:id', async (req, res) => {
+    console.log('Getting beer by ID:', req.params.id);
+    try {
+        const beer = await Beer.findByPk(req.params.id);
+        if (!beer) {
+            console.log('Beer not found');
+            return res.status(404).json({ message: 'Beer not found' });
+        }
+        res.json(beer);
+    } catch (err) {
+        console.error('Error fetching beer:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Update a beer
+app.put('/api/beer/:id', async (req, res) => {
+    console.log('Updating beer:', req.params.id);
+    try {
+        const beer = await Beer.findByPk(req.params.id);
+        if (!beer) {
+            console.log('Beer not found');
+            return res.status(404).json({ message: 'Beer not found' });
+        }
+        await beer.update(req.body);
+        console.log('Beer updated');
+        res.json(beer);
+    } catch (err) {
+        console.error('Error updating beer:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Delete a beer
+app.delete('/api/beer/:id', async (req, res) => {
+    console.log('Deleting beer:', req.params.id);
+    try {
+        const beer = await Beer.findByPk(req.params.id);
+        if (!beer) {
+            console.log('Beer not found');
+            return res.status(404).json({ message: 'Beer not found' });
+        }
+        await beer.destroy();
+        console.log('Beer deleted');
+        res.json({ message: 'Beer deleted successfully' });
+    } catch (err) {
+        console.error('Error deleting beer:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
 // Current sensor data (mock API functionality)
 app.get('/api/sensor-data/:process', (req, res) => {
     console.log('Sensor data requested for:', req.params.process);
