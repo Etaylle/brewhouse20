@@ -1,64 +1,126 @@
-import { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import React from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { useQuery, useQueryClient, UseQueryOptions } from '@tanstack/react-query';
+import { FC } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Thermometer, Droplets, Clock, Star, StarHalf } from 'lucide-react';
+import { Beer, Review, SensorData, LiveData } from '../types';
+
+interface DashboardState {
+    activeBeer: Beer | null;
+    reviews: Review[];
+    sensorData: Record<string, SensorData>;
+    historicalData: Record<string, LiveData[]>;
+    selectedRating: number;
+    isSubmittingReview: boolean;
+}
+
+interface DashboardError {
+    activeBeer: Error | null;
+    reviews: Error | null;
+    sensor: Error | null;
+}
 
 function Dashboard() {
-    const { data: activeBeer, error: activeBeerError, isLoading: activeBeerLoading } = useQuery({
+    const { 
+        data: activeBeerData, 
+        error: activeBeerError, 
+        isLoading: activeBeerLoading,
+        isFetching: activeBeerFetching
+    } = useQuery<Beer, Error>({
         queryKey: ['activeBeer'],
         queryFn: async () => {
             const response = await fetch('/api/beer/active');
-            if (!response.ok) throw new Error('Failed to fetch active beer');
-            return response.json();
+            if (!response.ok) {
+                throw new Error('Failed to fetch active beer');
+            }
+            const data = await response.json();
+            if (!data.name) {
+                throw new Error('Invalid beer data');
+            }
+            return data;
         },
         retry: 1,
+        retryDelay: 1000,
+        staleTime: 5 * 60 * 1000, // 5 minutes
+        refetchOnWindowFocus: false
     });
 
-    const { data: reviews, error: reviewsError } = useQuery({
-        queryKey: ['reviews', activeBeer?.name],
-        queryFn: async () => {
-            if (!activeBeer?.name) return null;
+    const activeBeer = activeBeerData || null;
+
+    const reviewsQueryOptions: UseQueryOptions<{ anzahl: number; durchschnitt: number }, Error> = {
+        enabled: !!activeBeer?.name,
+        refetchOnWindowFocus: false,
+        retry: 1,
+        staleTime: 5 * 60 * 1000, // 5 minutes,
+    };
+
+    const { 
+        data: reviewsData, 
+        error: reviewsError,
+        isLoading: reviewsLoading,
+        isFetching: reviewsFetching
+    } = useQuery<{ anzahl: number; durchschnitt: number }, Error>(
+        ['reviews', activeBeer?.name],
+        async () => {
+            if (!activeBeer?.name) return { anzahl: 0, durchschnitt: 0 };
             const response = await fetch(`/api/review/${activeBeer.name}`);
             if (!response.ok) throw new Error('Failed to fetch reviews');
             return response.json();
         },
-        enabled: !!activeBeer?.name,
-        retry: 1,
-    });
+        reviewsQueryOptions
+    );
 
-    const [sensorData, setSensorData] = useState({});
-    const [historicalData, setHistoricalData] = useState({});
+    const [sensorData, setSensorData] = useState<Record<string, SensorData>>({});
+    const [historicalData, setHistoricalData] = useState<Record<string, LiveData[]>>({});
     const [selectedRating, setSelectedRating] = useState(0);
     const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+    const [errorState, setErrorState] = useState<DashboardError>({
+        activeBeer: null,
+        reviews: null,
+        sensor: null
+    });
 
     // Fetch sensor data for all processes
     useEffect(() => {
         const fetchAllSensorData = async () => {
             const processes = ['gaerung', 'maischen', 'hopfenkochen'];
-            const newSensorData = {};
-            const newHistoricalData = {};
+            const newSensorData = {} as Record<string, SensorData>;
+            const newHistoricalData = {} as Record<string, LiveData[]>;
+            let hasError = false;
 
             for (const process of processes) {
                 try {
                     // Current data
                     const currentResponse = await fetch(`/api/sensor-data/${process}`);
                     if (currentResponse.ok) {
-                        newSensorData[process] = await currentResponse.json();
+                        const data = await currentResponse.json();
+                        if (!data.data || typeof data.data.temperatur !== 'number') {
+                            throw new Error('Invalid sensor data format');
+                        }
+                        newSensorData[process] = data;
                     }
 
                     // Historical data for charts
                     const liveResponse = await fetch(`/api/live/${process}`);
                     if (liveResponse.ok) {
                         const liveData = await liveResponse.json();
-                        newHistoricalData[process] = liveData.slice(0, 20).reverse(); // Last 20 points
+                        if (!Array.isArray(liveData)) {
+                            throw new Error('Invalid live data format');
+                        }
+                        newHistoricalData[process] = liveData.slice(0, 20).reverse();
                     }
                 } catch (error) {
                     console.error(`Error fetching data for ${process}:`, error);
+                    hasError = true;
                 }
             }
 
             setSensorData(newSensorData);
             setHistoricalData(newHistoricalData);
+            if (hasError) {
+                setErrorState(prev => ({ ...prev, sensor: new Error('Failed to fetch sensor data') }));
+            }
         };
 
         fetchAllSensorData();
@@ -66,9 +128,10 @@ function Dashboard() {
         return () => clearInterval(interval);
     }, []);
 
-    const submitReview = async () => {
-        if (!activeBeer?.name || selectedRating === 0) return;
-        
+    const queryClient = useQueryClient();
+    const submitReview = useCallback(async () => {
+        if (!activeBeer || selectedRating === 0) return;
+
         setIsSubmittingReview(true);
         try {
             const response = await fetch(`/api/review/${activeBeer.name}`, {
@@ -79,27 +142,29 @@ function Dashboard() {
                 body: JSON.stringify({ sterne: selectedRating }),
             });
 
-            if (response.ok) {
-                setSelectedRating(0);
-                // Refetch reviews
-                window.location.reload(); // Simple refresh for now
+            if (!response.ok) {
+                throw new Error('Failed to submit review');
             }
+
+            // Invalidate and refetch reviews
+            queryClient.invalidateQueries(['reviews', activeBeer.name]);
+            setSelectedRating(0);
         } catch (error) {
             console.error('Error submitting review:', error);
+            setErrorState(prev => ({ ...prev, reviews: error instanceof Error ? error : new Error('Failed to submit review') }));
         } finally {
             setIsSubmittingReview(false);
         }
-    };
+    }, [activeBeer, selectedRating, queryClient]);
 
-    const StarRating = ({ rating, onRate, readonly = false }) => {
+    const StarRating: React.FC<{ rating: number; onRate?: (rating: number) => void; readonly?: boolean }> = ({ rating, onRate, readonly = false }) => {
         return (
             <div className="flex space-x-1">
                 {[1, 2, 3, 4, 5].map((star) => (
-                    <button
+                    <div
                         key={star}
-                        onClick={() => !readonly && onRate(star)}
+                        onClick={() => !readonly && onRate?.(star)}
                         className={`${readonly ? 'cursor-default' : 'cursor-pointer hover:scale-110'} transition-transform`}
-                        disabled={readonly}
                     >
                         <Star
                             className={`w-6 h-6 ${
@@ -108,13 +173,13 @@ function Dashboard() {
                                     : 'text-gray-300'
                             }`}
                         />
-                    </button>
+                    </div>
                 ))}
             </div>
         );
     };
 
-    const ProcessCard = ({ process, data, historical }) => {
+    const ProcessCard: React.FC<{ process: string; data: SensorData | undefined; historical: LiveData[] | undefined }> = ({ process, data, historical }) => {
         const processNames = {
             gaerung: 'Gärung',
             maischen: 'Maischen',
@@ -129,68 +194,44 @@ function Dashboard() {
 
         const chartData = historical?.map((point, index) => ({
             time: index,
-            temperature: point.values?.temperatur || 0,
-            pressure: point.values?.druck || 0,
-            ph: point.values?.ph || 0,
+            temperature: point.data?.temperatur || 0,
+            pressure: point.data?.druck || 0,
+            ph: point.data?.ph || 0,
         })) || [];
 
         return (
             <div className="bg-white rounded-lg shadow-lg p-6">
-                <div className="flex items-center mb-4">
-                    {processIcons[process]}
-                    <h3 className="text-xl font-semibold ml-3">{processNames[process]}</h3>
+                <div className="flex items-center justify-between mb-4">
+                    {processIcons[process as keyof typeof processIcons]}
+                    <h3 className="text-xl font-semibold">{processNames[process as keyof typeof processNames]}</h3>
                 </div>
-
-                {/* Current Values */}
-                <div className="grid grid-cols-2 gap-4 mb-6">
-                    {data?.data && Object.entries(data.data).map(([key, value]) => (
-                        <div key={key} className="bg-gray-50 p-3 rounded">
-                            <div className="text-sm text-gray-600 capitalize">{key}</div>
-                            <div className="text-lg font-bold">
-                                {typeof value === 'number' ? value.toFixed(1) : value}
-                                {key === 'temperatur' && '°C'}
-                                {key === 'druck' && ' bar'}
-                                {key === 'ph' && ' pH'}
-                            </div>
-                        </div>
-                    ))}
-                </div>
-
-                {/* Chart */}
-                {chartData.length > 0 && (
-                    <div className="h-48">
-                        <ResponsiveContainer width="100%" height="100%">
-                            <LineChart data={chartData}>
-                                <CartesianGrid strokeDasharray="3 3" />
-                                <XAxis dataKey="time" />
-                                <YAxis />
-                                <Tooltip />
-                                <Legend />
-                                <Line
-                                    type="monotone"
-                                    dataKey="temperature"
-                                    stroke="#3b82f6"
-                                    name="Temperatur (°C)"
-                                    strokeWidth={2}
-                                />
-                                <Line
-                                    type="monotone"
-                                    dataKey="pressure"
-                                    stroke="#10b981"
-                                    name="Druck (bar)"
-                                    strokeWidth={2}
-                                />
-                                <Line
-                                    type="monotone"
-                                    dataKey="ph"
-                                    stroke="#f59e0b"
-                                    name="pH"
-                                    strokeWidth={2}
-                                />
-                            </LineChart>
-                        </ResponsiveContainer>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="bg-amber-50 p-4 rounded-lg">
+                        <div className="text-amber-600 font-semibold">Temperatur</div>
+                        <div className="text-2xl font-bold">{data?.data?.temperatur?.toFixed(1) || 0}°C</div>
                     </div>
-                )}
+                    <div className="bg-amber-50 p-4 rounded-lg">
+                        <div className="text-amber-600 font-semibold">Druck</div>
+                        <div className="text-2xl font-bold">{data?.data?.druck?.toFixed(1) || 0} bar</div>
+                    </div>
+                    <div className="bg-amber-50 p-4 rounded-lg">
+                        <div className="text-amber-600 font-semibold">pH</div>
+                        <div className="text-2xl font-bold">{data?.data?.ph?.toFixed(1) || 0}</div>
+                    </div>
+                </div>
+                <div className="mt-6">
+                    <ResponsiveContainer width="100%" height={200}>
+                        <LineChart data={chartData}>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="time" />
+                            <YAxis />
+                            <Tooltip />
+                            <Line type="monotone" dataKey="temperature" stroke="#82ca9d" name="Temperatur" />
+                            <Line type="monotone" dataKey="pressure" stroke="#8884d8" name="Druck" />
+                            <Line type="monotone" dataKey="ph" stroke="#ffc658" name="pH" />
+                        </LineChart>
+                    </ResponsiveContainer>
+                </div>
             </div>
         );
     };
@@ -199,118 +240,93 @@ function Dashboard() {
         <div className="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100">
             <div className="container mx-auto p-6">
                 <div className="text-center mb-8">
-                    <h1 className="text-5xl font-bold text-amber-800 mb-2">🍺 Bierbrauerei Dashboard</h1>
-                    <p className="text-amber-600 text-lg">Überwachung des Brauprozesses in Echtzeit</p>
+                    <h1 className="text-4xl font-bold text-amber-800 mb-2">Bier Dashboard</h1>
+                    <p className="text-gray-600">Überwache und bewerte deine Bierproduktion</p>
                 </div>
 
-                {/* Active Beer Section */}
-                <div className="bg-white rounded-lg shadow-lg p-6 mb-8">
-                    <h2 className="text-3xl font-bold text-amber-700 mb-4 flex items-center">
-                        🍺 Aktives Bier
-                    </h2>
-                    {activeBeerLoading ? (
-                        <div className="flex items-center justify-center p-8">
-                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-amber-600"></div>
-                            <span className="ml-3 text-amber-600">Lädt...</span>
-                        </div>
-                    ) : activeBeerError ? (
-                        <div className="bg-red-50 border border-red-200 rounded p-4">
-                            <p className="text-red-700">⚠️ Fehler beim Laden des aktiven Biers</p>
-                        </div>
-                    ) : activeBeer ? (
-                        <div className="bg-gradient-to-r from-amber-50 to-yellow-50 p-6 rounded-lg">
-                            <h3 className="text-2xl font-bold text-amber-800 mb-2">{activeBeer.name}</h3>
-                            <p className="text-amber-600 text-lg mb-1">Typ: {activeBeer.type}</p>
-                            <p className="text-amber-600">{activeBeer.description}</p>
-                        </div>
-                    ) : (
-                        <div className="text-center p-8 text-amber-600">
-                            <p className="text-lg">🚫 Kein aktives Bier gefunden</p>
-                        </div>
-                    )}
-                </div>
+                {activeBeer ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                        {/* Process Cards */}
+                        {['gaerung', 'maischen', 'hopfenkochen'].map((process) => (
+                            <ProcessCard
+                                key={process}
+                                process={process}
+                                data={sensorData[process]}
+                                historical={historicalData[process]}
+                            />
+                        ))}
 
-                {/* Process Cards */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6 mb-8">
-                    {['gaerung', 'maischen', 'hopfenkochen'].map(process => (
-                        <ProcessCard
-                            key={process}
-                            process={process}
-                            data={sensorData[process]}
-                            historical={historicalData[process]}
-                        />
-                    ))}
-                </div>
-
-                {/* Reviews Section */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* Submit Review */}
-                    <div className="bg-white rounded-lg shadow-lg p-6">
-                        <h2 className="text-2xl font-bold text-amber-700 mb-4 flex items-center">
-                            ⭐ Bier Bewerten
-                        </h2>
-                        {activeBeer ? (
-                            <div>
-                                <p className="text-gray-600 mb-4">
-                                    Wie findest du das Bier "{activeBeer.name}"?
-                                </p>
-                                <div className="mb-4">
-                                    <StarRating 
-                                        rating={selectedRating} 
-                                        onRate={setSelectedRating}
-                                    />
-                                </div>
-                                <button
-                                    onClick={submitReview}
-                                    disabled={selectedRating === 0 || isSubmittingReview}
-                                    className="bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white px-6 py-2 rounded-lg font-semibold transition-colors"
-                                >
-                                    {isSubmittingReview ? 'Wird gesendet...' : 'Bewertung Abgeben'}
-                                </button>
-                            </div>
-                        ) : (
-                            <p className="text-gray-500">Kein aktives Bier zum Bewerten verfügbar</p>
-                        )}
-                    </div>
-
-                    {/* Review Statistics */}
-                    <div className="bg-white rounded-lg shadow-lg p-6">
-                        <h2 className="text-2xl font-bold text-amber-700 mb-4 flex items-center">
-                            📊 Bewertungen
-                        </h2>
-                        {reviewsError ? (
-                            <div className="text-red-600">
-                                <p>⚠️ Fehler beim Laden der Bewertungen</p>
-                            </div>
-                        ) : reviews ? (
+                        {/* Reviews Section */}
+                        <div className="bg-white rounded-lg shadow-lg p-6">
+                            <h2 className="text-2xl font-semibold mb-4">Bewertungen</h2>
                             <div className="space-y-4">
-                                <div className="flex items-center justify-between bg-amber-50 p-4 rounded-lg">
-                                    <span className="text-amber-700 font-semibold">Anzahl Bewertungen</span>
-                                    <span className="text-2xl font-bold text-amber-800">{reviews.anzahl}</span>
-                                </div>
-                                <div className="flex items-center justify-between bg-amber-50 p-4 rounded-lg">
-                                    <span className="text-amber-700 font-semibold">Durchschnitt</span>
-                                    <div className="flex items-center space-x-2">
-                                        <span className="text-2xl font-bold text-amber-800">
-                                            {reviews.durchschnitt}
-                                        </span>
-                                        <StarRating 
-                                            rating={Math.round(parseFloat(reviews.durchschnitt))} 
-                                            readonly={true}
-                                        />
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <h3 className="text-xl font-semibold">Durchschnittliche Bewertung</h3>
+                                        <div className="text-4xl font-bold">
+                                            {reviewsData?.durchschnitt || '0.0'}
+                                            <Star className="inline-block w-6 h-6 text-yellow-400 ml-1" />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <h3 className="text-xl font-semibold">Anzahl Bewertungen</h3>
+                                        <div className="text-4xl font-bold">{reviewsData?.anzahl || 0}</div>
                                     </div>
                                 </div>
+                                <div className="border-t border-gray-200 pt-4">
+                                    <div className="flex items-center space-x-2">
+                                        <StarRating
+                                            rating={selectedRating}
+                                            onRate={setSelectedRating}
+                                            readonly={isSubmittingReview}
+                                        />
+                                        <button
+                                            onClick={submitReview}
+                                            disabled={isSubmittingReview || !selectedRating}
+                                            className={`px-4 py-2 rounded-lg ${
+                                                isSubmittingReview || !selectedRating
+                                                    ? 'bg-gray-300 cursor-not-allowed'
+                                                    : 'bg-blue-500 hover:bg-blue-600 text-white'
+                                            }`}
+                                        >
+                                            {isSubmittingReview ? 'Bewertung wird abgegeben...' : 'Bewertung abgeben'}
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="mt-4">
+                                    {reviewsData && reviewsData.anzahl > 0 ? (
+                                        <div className="space-y-4">
+                                            {/* reviews.map((review) => (
+                                                <div key={review.id} className="p-4 bg-gray-50 rounded-lg">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center space-x-2">
+                                                            <StarRating rating={review.sterne} readonly />
+                                                            <span className="text-gray-600">{review.sterne} Sterne</span>
+                                                        </div>
+                                                        <span className="text-sm text-gray-500">
+                                                            {new Date(review.createdAt).toLocaleDateString()}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            )) */}
+                                        </div>
+                                    ) : (
+                                        <div className="text-center text-gray-500 py-8">
+                                            <p>📝 Noch keine Bewertungen vorhanden</p>
+                                        </div>
+                                    )}
+                                </div>
                             </div>
-                        ) : (
-                            <div className="text-center text-gray-500 py-8">
-                                <p>📝 Noch keine Bewertungen vorhanden</p>
-                            </div>
-                        )}
+                        </div>
                     </div>
-                </div>
+                ) : (
+                    <div className="text-center text-gray-500 py-8">
+                        <p>📝 Kein aktives Bier vorhanden</p>
+                    </div>
+                )}
             </div>
         </div>
     );
-}
+};
 
 export default Dashboard;
