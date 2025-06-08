@@ -83,6 +83,22 @@ app.get('/api/beers', async (req, res) => {
     }
 });
 
+// Active beer - MUST come before /api/beer/:id route
+app.get('/api/beer/active', async (req, res) => {
+    console.log('Active beer requested');
+    try {
+        const activeBeer = await Beer.findOne({ where: { isActive: true } });
+        if (!activeBeer) {
+            console.log('No active beer found');
+            return res.status(404).json({ message: "No active beer found" });
+        }
+        res.json(activeBeer);
+    } catch (err) {
+        console.error("Error fetching active beer:", err);
+        res.status(500).json({ message: "Server error" });
+    }
+});
+
 // Get a specific beer by ID
 app.get('/api/beer/:id', async (req, res) => {
     console.log('Getting beer by ID:', req.params.id);
@@ -198,22 +214,6 @@ app.get('/api/history/:process/:date', async (req, res) => {
     }
 });
 
-// Active beer
-app.get('/api/beer/active', async (req, res) => {
-    console.log('Active beer requested');
-    try {
-        const activeBeer = await Beer.findOne({ where: { isActive: true } });
-        if (!activeBeer) {
-            console.log('No active beer found');
-            return res.status(404).json({ message: "No active beer found" });
-        }
-        res.json(activeBeer);
-    } catch (err) {
-        console.error("Error fetching active beer:", err);
-        res.status(500).json({ message: "Server error" });
-    }
-});
-
 // Submit review
 app.post('/api/review/:biername', async (req, res) => {
     console.log('Review submitted for:', req.params.biername);
@@ -289,18 +289,22 @@ async function pollAndStoreSensorData() {
 setInterval(pollAndStoreSensorData, 5000);
 console.log('🔄 Background sensor polling started');
 
-// Serve React frontend in production
-if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.join(__dirname, '../dist')));
-    app.get('*', (req, res) => {
-        res.sendFile(path.join(__dirname, '../dist/index.html'));
-    });
-}
+// UPDATED: Always serve React frontend (removed production check)
+console.log('Setting up static file serving...');
+app.use(express.static(path.join(__dirname, '../dist')));
+
+// Catch-all handler: send back React's index.html file for any non-API routes
+app.get('*', (req, res) => {
+    console.log('Serving React app for route:', req.path);
+    res.sendFile(path.join(__dirname, '../dist/index.html'));
+});
 
 // Start server
-app.listen(PORT, () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
-    console.log(`📊 API endpoints available at http://localhost:${PORT}/api/`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
+    console.log(`📊 API endpoints available at http://0.0.0.0:${PORT}/api/`);
+    console.log(`🌐 Frontend served at http://0.0.0.0:${PORT}`);
+    console.log(`🌐 Accessible via VPN at http://10.123.26.22:${PORT}`);
 }).on('error', (err) => {
     console.error('Server error:', err);
     process.exit(1);
