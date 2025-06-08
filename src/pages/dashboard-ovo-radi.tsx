@@ -49,7 +49,7 @@ const ProcessCard: React.FC<{ process: ProcessType; data: SensorData | LiveData 
             <div className="flex items-center justify-between mb-4">
                 <div>
                     <h3 className="text-lg font-semibold text-gray-800">{processNames[process]}</h3>
-                    <p className="text-sm text-gray-500">{formatTimestamp(historical?.[historical.length - 1]?.timestamp)}</p>
+                    <p className="text-sm text-gray-500">{formatTimestamp(data?.timestamp)}</p>
                 </div>
                 {processIcons[process]}
             </div>
