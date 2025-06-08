@@ -1,140 +1,218 @@
-import React from 'react';
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useQuery, useQueryClient, UseQueryOptions } from '@tanstack/react-query';
-import { FC } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { Thermometer, Droplets, Clock, Star, StarHalf } from 'lucide-react';
-import { Beer, Review, SensorData, LiveData } from '../types';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { Thermometer, Droplets, Star } from 'lucide-react';
+import { format } from 'date-fns';
+import de from 'date-fns/locale/de';
+import { ChartDataPoint, LiveData, ProcessType, SensorData, DashboardError, Beer, Review, ReviewsSummary } from '../types';
 
-interface DashboardState {
-    activeBeer: Beer | null;
-    reviews: Review[];
-    sensorData: Record<string, SensorData>;
-    historicalData: Record<string, LiveData[]>;
-    selectedRating: number;
-    isSubmittingReview: boolean;
-}
+const processNames: Record<ProcessType, string> = {
+    gaerung: 'Gärung',
+    maischen: 'Maischen',
+    hopfenkochen: 'Hopfenkochen'
+};
 
-interface DashboardError {
-    activeBeer: Error | null;
-    reviews: Error | null;
-    sensor: Error | null;
-}
+const processIcons: Record<ProcessType, React.ReactNode> = {
+    gaerung: <Thermometer className="w-5 h-5 text-red-500" />,
+    maischen: <Droplets className="w-5 h-5 text-blue-500" />,
+    hopfenkochen: <Star className="w-5 h-5 text-yellow-500" />
+};
 
-function Dashboard() {
+const formatTimestamp = (timestamp: string | undefined): string => {
+    if (!timestamp) {
+        return 'Keine Daten';
+    }
+    const parsedDate = Date.parse(timestamp);
+    if (isNaN(parsedDate)) {
+        return 'Ungültiges Datum';
+    }
+    return format(new Date(parsedDate), 'HH:mm:ss', { locale: de });
+};
+
+// ProcessCard component
+const ProcessCard: React.FC<{ process: ProcessType; data: SensorData | undefined; historical: LiveData[] | undefined }> = ({ process, data, historical }) => {
+    const chartData: ChartDataPoint[] = historical?.map((point, index) => ({
+        time: point.timestamp ? new Date(point.timestamp).getTime() : index,
+        temperature: point.values?.temperatur || 0,
+        pressure: point.values?.druck || 0,
+        ph: point.values?.ph || 0,
+    })) || [];
+
+    return (
+        <div className="bg-white rounded-lg shadow-md p-6">
+            <div className="flex items-center justify-between mb-4">
+                <div>
+                    <h3 className="text-lg font-semibold text-gray-800">{processNames[process]}</h3>
+                    <p className="text-sm text-gray-500">{formatTimestamp(data?.timestamp)}</p>
+                </div>
+                {processIcons[process]}
+            </div>
+            <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="text-center">
+                    <p className="text-2xl font-bold text-red-500">{data?.temperatur?.toFixed(1) ?? '0.0'}°C</p>
+                    <p className="text-gray-500">Temperatur</p>
+                </div>
+                <div className="text-center">
+                    <p className="text-2xl font-bold text-blue-500">{data?.druck?.toFixed(1) ?? '0.0'} bar</p>
+                    <p className="text-gray-500">Druck</p>
+                </div>
+            </div>
+            <div className="h-48">
+                <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="time" tickFormatter={(value) => formatTimestamp(new Date(value).toISOString())} />
+                        <YAxis />
+                        <Tooltip />
+                        <Line type="monotone" dataKey="temperature" stroke="#ff4b4b" name="Temperatur" />
+                        <Line type="monotone" dataKey="pressure" stroke="#3b82f6" name="Druck" />
+                        <Line type="monotone" dataKey="ph" stroke="#10b981" name="pH" />
+                    </LineChart>
+                </ResponsiveContainer>
+            </div>
+        </div>
+    );
+};
+
+// StarRating component
+const StarRating: React.FC<{ rating: number; onRate: (rating: number) => void }> = ({ rating, onRate }) => {
+    const stars = Array(5).fill(0);
+    return (
+        <div className="flex items-center">
+            {stars.map((_, index) => (
+                <Star
+                    key={index}
+                    className={`w-6 h-6 cursor-pointer ${index < rating ? 'text-yellow-400' : 'text-gray-300'}`}
+                    onClick={() => onRate(index + 1)}
+                />
+            ))}
+        </div>
+    );
+};
+
+export default function Dashboard() {
+    const [error, setError] = useState<DashboardError>({
+        activeBeer: null,
+        reviews: null,
+        sensor: null
+    });
+    const [selectedRating, setSelectedRating] = useState(0);
+    const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+    const [sensorData, setSensorData] = useState<Record<ProcessType, SensorData | undefined>>({
+        gaerung: undefined,
+        maischen: undefined,
+        hopfenkochen: undefined
+    });
+    const [historicalData, setHistoricalData] = useState<Record<ProcessType, LiveData[] | undefined>>({
+        gaerung: undefined,
+        maischen: undefined,
+        hopfenkochen: undefined
+    });
+
+    const queryClient = useQueryClient();
+
+    // Fetch active beer data
     const { 
         data: activeBeerData, 
         error: activeBeerError, 
-        isLoading: activeBeerLoading,
-        isFetching: activeBeerFetching
-    } = useQuery<Beer, Error>({
-        queryKey: ['activeBeer'],
-        queryFn: async () => {
+        isLoading: isBeerLoading 
+    } = useQuery<Beer | null>(
+        ['active-beer'],
+        async () => {
             const response = await fetch('/api/beer/active');
             if (!response.ok) {
                 throw new Error('Failed to fetch active beer');
             }
             const data = await response.json();
-            if (!data.name) {
-                throw new Error('Invalid beer data');
+            return data || null;
+        },
+        {
+            enabled: true,
+            refetchOnWindowFocus: false,
+            retry: 1,
+            staleTime: 5 * 60 * 1000, // 5 minutes,
+            onError: (error: unknown) => {
+                console.error('Error fetching active beer:', error);
+                setError(prev => ({ ...prev, activeBeer: error instanceof Error ? error : new Error('Failed to fetch active beer') }));
             }
-            return data;
-        },
-        retry: 1,
-        retryDelay: 1000,
-        staleTime: 5 * 60 * 1000, // 5 minutes
-        refetchOnWindowFocus: false
-    });
-
-    const activeBeer = activeBeerData || null;
-
-    const reviewsQueryOptions: UseQueryOptions<{ anzahl: number; durchschnitt: number }, Error> = {
-        enabled: !!activeBeer?.name,
-        refetchOnWindowFocus: false,
-        retry: 1,
-        staleTime: 5 * 60 * 1000, // 5 minutes,
-    };
-
-    const { 
-        data: reviewsData, 
-        error: reviewsError,
-        isLoading: reviewsLoading,
-        isFetching: reviewsFetching
-    } = useQuery<{ anzahl: number; durchschnitt: number }, Error>(
-        ['reviews', activeBeer?.name],
-        async () => {
-            if (!activeBeer?.name) return { anzahl: 0, durchschnitt: 0 };
-            const response = await fetch(`/api/review/${activeBeer.name}`);
-            if (!response.ok) throw new Error('Failed to fetch reviews');
-            return response.json();
-        },
-        reviewsQueryOptions
+        }
     );
 
-    const [sensorData, setSensorData] = useState<Record<string, SensorData>>({});
-    const [historicalData, setHistoricalData] = useState<Record<string, LiveData[]>>({});
-    const [selectedRating, setSelectedRating] = useState(0);
-    const [isSubmittingReview, setIsSubmittingReview] = useState(false);
-    const [errorState, setErrorState] = useState<DashboardError>({
-        activeBeer: null,
-        reviews: null,
-        sensor: null
-    });
+    // Fetch reviews data
+    const { 
+        data: reviewsData, 
+        error: reviewsError, 
+        isLoading: isReviewsLoading 
+    } = useQuery<ReviewsSummary | null>(
+        ['reviews', activeBeerData?.name],
+        async () => {
+            if (!activeBeerData?.name) {
+                return null;
+            }
+            const response = await fetch(`/api/review/${activeBeerData.name}`);
+            if (!response.ok) {
+                throw new Error('Failed to fetch reviews');
+            }
+            return await response.json();
+        },
+        {
+            enabled: !!activeBeerData?.name,
+            refetchOnWindowFocus: false,
+            retry: 1,
+            staleTime: 5 * 60 * 1000, // 5 minutes,
+            onError: (error: unknown) => {
+                console.error('Error fetching reviews:', error);
+                setError(prev => ({ ...prev, reviews: error instanceof Error ? error : new Error('Failed to fetch reviews') }));
+            }
+        }
+    );
 
     // Fetch sensor data for all processes
-    useEffect(() => {
-        const fetchAllSensorData = async () => {
-            const processes = ['gaerung', 'maischen', 'hopfenkochen'];
-            const newSensorData = {} as Record<string, SensorData>;
-            const newHistoricalData = {} as Record<string, LiveData[]>;
-            let hasError = false;
+    const fetchAllSensorData = useCallback(async () => {
+        const processes = ['gaerung', 'maischen', 'hopfenkochen'];
+        const newSensorData = { ...sensorData };
+        const newHistoricalData = { ...historicalData };
+        let hasError = false;
 
-            for (const process of processes) {
-                try {
-                    // Current data
-                    const currentResponse = await fetch(`/api/sensor-data/${process}`);
-                    if (currentResponse.ok) {
-                        const data = await currentResponse.json();
-                        if (!data.data || typeof data.data.temperatur !== 'number') {
-                            throw new Error('Invalid sensor data format');
-                        }
-                        newSensorData[process] = data;
-                    }
-
-                    // Historical data for charts
-                    const liveResponse = await fetch(`/api/live/${process}`);
-                    if (liveResponse.ok) {
-                        const liveData = await liveResponse.json();
-                        if (!Array.isArray(liveData)) {
-                            throw new Error('Invalid live data format');
-                        }
-                        newHistoricalData[process] = liveData.slice(0, 20).reverse();
-                    }
-                } catch (error) {
-                    console.error(`Error fetching data for ${process}:`, error);
-                    hasError = true;
+        for (const process of processes) {
+            try {
+                const currentResponse = await fetch(`/api/sensor-data/${process}`);
+                if (!currentResponse.ok) {
+                    throw new Error('Failed to fetch sensor data');
                 }
-            }
+                newSensorData[process as ProcessType] = await currentResponse.json();
 
-            setSensorData(newSensorData);
-            setHistoricalData(newHistoricalData);
-            if (hasError) {
-                setErrorState(prev => ({ ...prev, sensor: new Error('Failed to fetch sensor data') }));
+                const liveResponse = await fetch(`/api/live/${process}`);
+                if (!liveResponse.ok) {
+                    throw new Error('Failed to fetch live data');
+                }
+                newHistoricalData[process as ProcessType] = await liveResponse.json();
+            } catch (error) {
+                console.error(`Error fetching data for ${process}:`, error);
+                hasError = true;
             }
-        };
+        }
 
+        setSensorData(newSensorData);
+        setHistoricalData(newHistoricalData);
+        if (hasError) {
+            setError(prev => ({ ...prev, sensor: new Error('Failed to fetch sensor data') }));
+        }
+    }, [sensorData, historicalData]);
+
+    useEffect(() => {
         fetchAllSensorData();
         const interval = setInterval(fetchAllSensorData, 10000);
         return () => clearInterval(interval);
-    }, []);
+    }, [fetchAllSensorData]);
 
-    const queryClient = useQueryClient();
+    // Submit review
     const submitReview = useCallback(async () => {
-        if (!activeBeer || selectedRating === 0) return;
+        if (!activeBeerData || selectedRating === 0) return;
 
         setIsSubmittingReview(true);
         try {
-            const response = await fetch(`/api/review/${activeBeer.name}`, {
+            const response = await fetch(`/api/review/${activeBeerData.name}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -147,186 +225,72 @@ function Dashboard() {
             }
 
             // Invalidate and refetch reviews
-            queryClient.invalidateQueries(['reviews', activeBeer.name]);
+            queryClient.invalidateQueries(['reviews', activeBeerData.name]);
             setSelectedRating(0);
         } catch (error) {
             console.error('Error submitting review:', error);
-            setErrorState(prev => ({ ...prev, reviews: error instanceof Error ? error : new Error('Failed to submit review') }));
+            setError(prev => ({ ...prev, reviews: error instanceof Error ? error : new Error('Failed to submit review') }));
+            alert('Fehler beim Absenden der Bewertung. Bitte versuchen Sie es erneut.');
         } finally {
             setIsSubmittingReview(false);
         }
-    }, [activeBeer, selectedRating, queryClient]);
-
-    const StarRating: React.FC<{ rating: number; onRate?: (rating: number) => void; readonly?: boolean }> = ({ rating, onRate, readonly = false }) => {
-        return (
-            <div className="flex space-x-1">
-                {[1, 2, 3, 4, 5].map((star) => (
-                    <div
-                        key={star}
-                        onClick={() => !readonly && onRate?.(star)}
-                        className={`${readonly ? 'cursor-default' : 'cursor-pointer hover:scale-110'} transition-transform`}
-                    >
-                        <Star
-                            className={`w-6 h-6 ${
-                                star <= rating
-                                    ? 'text-yellow-400 fill-yellow-400'
-                                    : 'text-gray-300'
-                            }`}
-                        />
-                    </div>
-                ))}
-            </div>
-        );
-    };
-
-    const ProcessCard: React.FC<{ process: string; data: SensorData | undefined; historical: LiveData[] | undefined }> = ({ process, data, historical }) => {
-        const processNames = {
-            gaerung: 'Gärung',
-            maischen: 'Maischen',
-            hopfenkochen: 'Hopfenkochen'
-        };
-
-        const processIcons = {
-            gaerung: <Thermometer className="w-8 h-8 text-blue-500" />,
-            maischen: <Droplets className="w-8 h-8 text-green-500" />,
-            hopfenkochen: <Clock className="w-8 h-8 text-red-500" />
-        };
-
-        const chartData = historical?.map((point, index) => ({
-            time: index,
-            temperature: point.data?.temperatur || 0,
-            pressure: point.data?.druck || 0,
-            ph: point.data?.ph || 0,
-        })) || [];
-
-        return (
-            <div className="bg-white rounded-lg shadow-lg p-6">
-                <div className="flex items-center justify-between mb-4">
-                    {processIcons[process as keyof typeof processIcons]}
-                    <h3 className="text-xl font-semibold">{processNames[process as keyof typeof processNames]}</h3>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="bg-amber-50 p-4 rounded-lg">
-                        <div className="text-amber-600 font-semibold">Temperatur</div>
-                        <div className="text-2xl font-bold">{data?.data?.temperatur?.toFixed(1) || 0}°C</div>
-                    </div>
-                    <div className="bg-amber-50 p-4 rounded-lg">
-                        <div className="text-amber-600 font-semibold">Druck</div>
-                        <div className="text-2xl font-bold">{data?.data?.druck?.toFixed(1) || 0} bar</div>
-                    </div>
-                    <div className="bg-amber-50 p-4 rounded-lg">
-                        <div className="text-amber-600 font-semibold">pH</div>
-                        <div className="text-2xl font-bold">{data?.data?.ph?.toFixed(1) || 0}</div>
-                    </div>
-                </div>
-                <div className="mt-6">
-                    <ResponsiveContainer width="100%" height={200}>
-                        <LineChart data={chartData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="time" />
-                            <YAxis />
-                            <Tooltip />
-                            <Line type="monotone" dataKey="temperature" stroke="#82ca9d" name="Temperatur" />
-                            <Line type="monotone" dataKey="pressure" stroke="#8884d8" name="Druck" />
-                            <Line type="monotone" dataKey="ph" stroke="#ffc658" name="pH" />
-                        </LineChart>
-                    </ResponsiveContainer>
-                </div>
-            </div>
-        );
-    };
+    }, [activeBeerData, selectedRating, queryClient]);
 
     return (
-        <div className="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100">
-            <div className="container mx-auto p-6">
-                <div className="text-center mb-8">
-                    <h1 className="text-4xl font-bold text-amber-800 mb-2">Bier Dashboard</h1>
-                    <p className="text-gray-600">Überwache und bewerte deine Bierproduktion</p>
+        <div className="p-6">
+            {/* Active Beer Info */}
+            <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+                <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-2xl font-bold text-gray-800">Aktuelles Bier</h2>
                 </div>
-
-                {activeBeer ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                        {/* Process Cards */}
-                        {['gaerung', 'maischen', 'hopfenkochen'].map((process) => (
-                            <ProcessCard
-                                key={process}
-                                process={process}
-                                data={sensorData[process]}
-                                historical={historicalData[process]}
-                            />
-                        ))}
-
-                        {/* Reviews Section */}
-                        <div className="bg-white rounded-lg shadow-lg p-6">
-                            <h2 className="text-2xl font-semibold mb-4">Bewertungen</h2>
-                            <div className="space-y-4">
-                                <div className="flex items-center justify-between">
-                                    <div>
-                                        <h3 className="text-xl font-semibold">Durchschnittliche Bewertung</h3>
-                                        <div className="text-4xl font-bold">
-                                            {reviewsData?.durchschnitt || '0.0'}
-                                            <Star className="inline-block w-6 h-6 text-yellow-400 ml-1" />
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <h3 className="text-xl font-semibold">Anzahl Bewertungen</h3>
-                                        <div className="text-4xl font-bold">{reviewsData?.anzahl || 0}</div>
-                                    </div>
-                                </div>
-                                <div className="border-t border-gray-200 pt-4">
-                                    <div className="flex items-center space-x-2">
-                                        <StarRating
-                                            rating={selectedRating}
-                                            onRate={setSelectedRating}
-                                            readonly={isSubmittingReview}
-                                        />
-                                        <button
-                                            onClick={submitReview}
-                                            disabled={isSubmittingReview || !selectedRating}
-                                            className={`px-4 py-2 rounded-lg ${
-                                                isSubmittingReview || !selectedRating
-                                                    ? 'bg-gray-300 cursor-not-allowed'
-                                                    : 'bg-blue-500 hover:bg-blue-600 text-white'
-                                            }`}
-                                        >
-                                            {isSubmittingReview ? 'Bewertung wird abgegeben...' : 'Bewertung abgeben'}
-                                        </button>
-                                    </div>
-                                </div>
-                                <div className="mt-4">
-                                    {reviewsData && reviewsData.anzahl > 0 ? (
-                                        <div className="space-y-4">
-                                            {/* reviews.map((review) => (
-                                                <div key={review.id} className="p-4 bg-gray-50 rounded-lg">
-                                                    <div className="flex items-center justify-between">
-                                                        <div className="flex items-center space-x-2">
-                                                            <StarRating rating={review.sterne} readonly />
-                                                            <span className="text-gray-600">{review.sterne} Sterne</span>
-                                                        </div>
-                                                        <span className="text-sm text-gray-500">
-                                                            {new Date(review.createdAt).toLocaleDateString()}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            )) */}
-                                        </div>
-                                    ) : (
-                                        <div className="text-center text-gray-500 py-8">
-                                            <p>📝 Noch keine Bewertungen vorhanden</p>
-                                        </div>
-                                    )}
-                                </div>
+                {isBeerLoading ? (
+                    <p className="text-gray-500">Lade aktuelles Bier...</p>
+                ) : activeBeerData ? (
+                    <div className="space-y-4">
+                        <div className="flex items-center space-x-4">
+                            <div className="flex-1">
+                                <h3 className="text-lg font-semibold text-gray-800">{activeBeerData?.name}</h3>
+                                <p className="text-sm text-gray-500">{activeBeerData?.type}</p>
                             </div>
+                            <div className="text-right">
+                                <p className="text-2xl font-bold text-gray-800">{reviewsData?.durchschnitt || 0} ⭐</p>
+                                <p className="text-sm text-gray-500">Bewertungen: {reviewsData?.anzahl || 0}</p>
+                            </div>
+                        </div>
+                        <div className="flex items-center space-x-4">
+                            <button
+                                onClick={submitReview}
+                                disabled={isSubmittingReview || selectedRating === 0}
+                                className={`px-4 py-2 rounded-md text-sm font-medium ${
+                                    isSubmittingReview || selectedRating === 0
+                                        ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
+                                        : 'bg-blue-500 text-white hover:bg-blue-600'
+                                }`}
+                            >
+                                {isSubmittingReview ? 'Absenden...' : 'Bewertung absenden'}
+                            </button>
+                            <StarRating
+                                rating={selectedRating}
+                                onRate={setSelectedRating}
+                            />
                         </div>
                     </div>
                 ) : (
-                    <div className="text-center text-gray-500 py-8">
-                        <p>📝 Kein aktives Bier vorhanden</p>
-                    </div>
+                    <p className="text-gray-500">Kein aktuelles Bier gefunden</p>
                 )}
+            </div>
+
+            {/* Process Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {Object.entries(sensorData).map(([process, data]) => (
+                    <ProcessCard
+                        key={process}
+                        process={process as ProcessType}
+                        data={data}
+                        historical={historicalData[process as ProcessType]}
+                    />
+                ))}
             </div>
         </div>
     );
-};
-
-export default Dashboard;
+}
